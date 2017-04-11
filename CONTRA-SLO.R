@@ -22,7 +22,7 @@ redisSelect(1)
 if(length(args)>1){
         static<-redisHGetAll(toupper(args[2]))
 }else{
-        static<-redisHGetAll("CONTRA-LLO")
+        static<-redisHGetAll("CONTRA-SLO")
 }
 
 newargs<-unlist(strsplit(static$args,","))
@@ -45,6 +45,7 @@ kBrokerage<-as.numeric(static$SingleLegBrokerageAsPercentOfValue)/100
 kPerContractBrokerage=as.numeric(static$SingleLegBrokerageAsValuePerContract)
 kMaxContracts=as.numeric(static$MaxContracts)
 kHomeDirectory=static$HomeDirectory
+kAnnualizedYieldThreshold=as.numeric(static$AnnualizedYieldThreshold)
 kLogFile=static$LogFile
 setwd(kHomeDirectory)
 strategyname = args[2]
@@ -58,7 +59,18 @@ logfile(logger) <- kLogFile
 level(logger) <- 'INFO'
 levellog(logger, "INFO", "Starting BOD Scan")
 
-
+###### FUNCTIONS ##############
+getcontractsize <- function (x, size) {
+        a <- size[size$startdate <= as.Date(x) & size$enddate >=as.Date(x),]
+        if(nrow(a)>0){
+                a<-head(a,1)
+        }
+        if(nrow(a)>0){
+                return(a$contractsize)
+        } else
+                return(0)
+        
+}
 ###### BACKTEST ##############
 
 ###### Load Data #############
@@ -90,27 +102,38 @@ splits <-
         )
 #splits$symbol = gsub("[^0-9A-Za-z/-]", "", splits$symbol)
 
-niftysymbols <-
-        createIndexConstituents(2, "nifty50", threshold = "2015-01-01")
-folots <- createFNOSize(2, "contractsize", threshold = "2015-01-01")
-
-invalidsymbols = numeric()
+niftysymbols <- createIndexConstituents(2,"nifty50",threshold="2005-01-01")
+niftysymbols$symbol<-sapply(niftysymbols$symbol,getMostRecentSymbol,symbolchange$key,symbolchange$newsymbol)
+folots<-createFNOSize(2,"contractsize",threshold="2015-01-01")
+folots$symbol<-sapply(folots$symbol,getMostRecentSymbol,symbolchange$key,symbolchange$newsymbol)
+niftysymbols=niftysymbols[niftysymbols$symbol!="BAJAJHLDNG",]
+niftysymbols=niftysymbols[niftysymbols$symbol!="CNXIT",]
+niftysymbols=niftysymbols[niftysymbols$symbol!="BANKNIFTY",]
+tradingsymbols=niftysymbols$symbol
+tradingsymbols=tradingsymbols[tradingsymbols!="BAJAJHLDNG"]
+if(length(grep("CNX",tradingsymbols))>0){
+        tradingsymbols=tradingsymbols[-grep("CNX",tradingsymbols)]
+}
+if(length(grep("NIFTY",tradingsymbols))>0){
+        tradingsymbols=tradingsymbols[-grep("NIFTY",tradingsymbols)]
+}
+tradingsymbols=sapply(tradingsymbols,getMostRecentSymbol,symbolchange$key,symbolchange$newsymbol)
+tradingsymbols=unique(tradingsymbols)
+invalidsymbols=numeric()
 endtime = format(Sys.time(), format = "%Y-%m-%d %H:%M:%S")
-#cl <- makeCluster(detectCores())
-#registerDoParallel(cl)
+
 if (kGetMarketData) {
-        for (i in 1:nrow(niftysymbols)) {
-                # foreach (i =1:nrow(niftysymbols),.packages="RTrade") %dopar% {
+        for (i in 1:length(tradingsymbols)) {
                 md = data.frame() # create placeholder for market data
-                symbol = niftysymbols$symbol[i]
-                kairossymbol = symbol
+                symbol = tradingsymbols[i]
+                kairossymbol=symbol
                 if (file.exists(paste(kNiftyDataFolder, symbol, ".Rdata", sep = ""))) {
                         load(paste(kNiftyDataFolder, symbol, ".Rdata", sep = ""))
                         if (nrow(md) > 0) {
                                 starttime = strftime(md[nrow(md), c("date")] + 1,
-                                                     tz = "Asia/Kolkata",
+                                                     tz = kTimeZone,
                                                      "%Y-%m-%d %H:%M:%S")
-                        } else{
+                        }else{
                                 starttime = "1995-11-01 09:15:00"
                         }
                 } else{
@@ -119,7 +142,7 @@ if (kGetMarketData) {
                 temp <-
                         kGetOHLCV(
                                 paste("symbol", tolower(kairossymbol), sep = "="),
-                                df = md,
+                                df=md,
                                 start = starttime,
                                 end = endtime,
                                 timezone = "Asia/Kolkata",
@@ -146,16 +169,16 @@ if (kGetMarketData) {
                                 aUnit = "days",
                                 splits = splits,
                                 symbolchange = symbolchange
-
+                                
                         )
-                #md <- rbind(md, temp)
-                md <- temp
-                md$symbol <- symbol
-                save(md,
-                     file = paste(kNiftyDataFolder, symbol, ".Rdata", sep = "")) # save new market data to disc
-
+                md<-temp
+                if(nrow(md)>0){
+                        md$symbol<-symbol
+                        save(md,
+                             file = paste(kNiftyDataFolder, symbol, ".Rdata", sep = "")) # save new market data to disc
+                }
+                
         }
-        #stopCluster(cl)
 
         # get index data
         md = data.frame() # create placeholder for market data
@@ -215,11 +238,11 @@ if (kGetMarketData) {
 
 ##### 1. Calculate Indicators ########
 MALongPeriod = 200
-EntryRSI = 20
-ExitRSI = 80
+EntryRSI = 80
+ExitRSI = 20
 RSIPeriod = 2
 ExitRSIPeriod = 2
-LowRSIBars = 2
+HighRSIBars = 2
 
 slope <- function (x) {
         res <- (lm(log(x) ~ seq(1:length(x))))
@@ -234,150 +257,142 @@ r2 <- function(x) {
 
 signals <- data.frame()
 allmd <- list()
-for (i in 1:nrow(niftysymbols)) {
+for (i in 1:length(tradingsymbols)) {
         #for (i in 1:10) {
         print(i)
-        symbol = niftysymbols$symbol[i]
-        if (file.exists(paste(kNiftyDataFolder, symbol, ".Rdata", sep = ""))) {
+        symbol = tradingsymbols[i]
+        if(file.exists(paste(kNiftyDataFolder, symbol, ".Rdata", sep = ""))){
                 load(paste(kNiftyDataFolder, symbol, ".Rdata", sep = "")) #loads md
-                md <- md[md$date >= kDataCutOffBefore, ]
-                if (nrow(md) > MALongPeriod) {
+                md <- md[md$date >= kDataCutOffBefore,]
+                if(nrow(md)>MALongPeriod){
                         md$CurrentRSI = RSI(md$asettle, RSIPeriod)
-                        md$eligible = ifelse(
-                                as.Date(md$date) >= niftysymbols[i, c("startdate")] &
-                                        as.Date(md$date) <= niftysymbols[i, c("enddate")],
-                                1,
-                                0
-                        )
-                        md$CurrentLTRSI = RSI(md$asettle, 14)
-                        md$CloseAboveLongTermMA = md$asettle > EMA(md$asettle, MALongPeriod)
-                        md$LowerClose = md$asettle < Ref(md$asettle,-1)
-                        md$MultipleDayLowRSI = runSum(RSI(md$asettle, 2) < EntryRSI,
-                                                      LowRSIBars) ==
-                                LowRSIBars
-                        pointslope=rollapply(md$asettle, 90, slope)
-                        md$pointslope= c(rep(NA,nrow(md) - length(pointslope)),pointslope)
-                        AnnualizedSlope = (exp(rollapply(
-                                md$asettle, 90, slope
-                        )) ^ 252) - 1
+                        # md$IndexCloseBelowLongTermMA = NSENIFTY$asettle < EMA(NSENIFTY$asettle, MALongPeriod)
+                        index=which(niftysymbols$symbol==symbol)
+                        if(length(index)>0){
+                                #eligible if nifty index did not contain symbol on the date
+                                md$eligible=1
+                                for(j in 1:length(index)){
+                                        md$eligible=md$eligible*ifelse(as.Date(md$date)>=niftysymbols[index[j],c("startdate")] & as.Date(md$date)<=niftysymbols[index[j],c("enddate")],0,1)
+                                        #                md$eligible=md$eligible & md$IndexCloseBelowLongTermMA
+                                }
+                                #md$eligible=ifelse(as.Date(md$date)>=niftysymbols[i,c("startdate")] & as.Date(md$date)>niftysymbols[i,c("enddate")],1,0)
+                        }else{
+                                md$eligible=1      
+                                #       md$eligible=md$eligible & md$IndexCloseBelowLongTermMA
+                        }
+                        #md$eligible=ifelse(length(which(niftysymbols$symbol==symbol))>0,0,1)
+                        md$CloseBelowLongTermMA = md$asettle < EMA(md$asettle, MALongPeriod)
+                        md$HigherClose = md$asettle > Ref(md$asettle, -1)
+                        md$MultipleDayHighRSI = runSum(RSI(md$asettle, RSIPeriod) > EntryRSI, HighRSIBars) ==
+                                HighRSIBars
+                        AnnualizedSlope = (exp(rollapply(md$asettle, 90, slope)) ^ 252) - 1
                         md$AnnualizedSlope <-
-                                c(rep(
-                                        NA,
-                                        nrow(md) - length(AnnualizedSlope)
-                                ),
-                                AnnualizedSlope)
+                                c(rep(NA, nrow(md) - length(AnnualizedSlope)), AnnualizedSlope)
                         r <- rollapply(md$asettle, 90, r2)
                         md$r <- c(rep(NA, nrow(md) - length(r)), r)
+                        
                         ####### 2. Generate Buy/Sell Arrays ##########
-                        md$sell = Cross(RSI(md$asettle, ExitRSIPeriod),
-                                        ExitRSI)
-
-                        BarsSinceSell = BarsSince(md$sell)
-
-                        md$firstentry = md$CloseAboveLongTermMA &
-                                md$MultipleDayLowRSI &
-                                md$AnnualizedSlope > 0 & md$r > 0.7 &
-                                md$CurrentLTRSI > 0.7
-                        InFirstPos = Flip(md$firstentry, md$sell)
-
-                        FirstTrigger = ExRem(InFirstPos, md$sell)
-
+                        md$cover = Cross(ExitRSI,RSI(md$asettle, ExitRSIPeriod))
+                        
+                        BarsSinceCover = BarsSince(md$cover)
+                        
+                        md$firstentry = md$CloseBelowLongTermMA &
+                                md$MultipleDayHighRSI &
+                                md$AnnualizedSlope < kAnnualizedYieldThreshold & md$r > 0.7
+                        InFirstPos = Flip(md$firstentry, md$cover)
+                        
+                        FirstTrigger = ExRem(InFirstPos, md$cover)
+                        
                         BarsSinceFirstTrigger = BarsSince(FirstTrigger)
                         FirstTriggerPrice = ifelse(
-                                BarsSinceFirstTrigger < BarsSinceSell,
-                                Ref(md$asettle, -BarsSinceFirstTrigger),
+                                BarsSinceFirstTrigger < BarsSinceCover,
+                                Ref(md$asettle,-BarsSinceFirstTrigger),
                                 0
                         )
-
-
-                        SecondEntry = md$CloseAboveLongTermMA &
-                                md$asettle < FirstTriggerPrice &
+                        
+                        
+                        SecondEntry = md$CloseBelowLongTermMA &
+                                md$asettle > FirstTriggerPrice &
                                 InFirstPos &
-                                Ref(InFirstPos, -1) & md$AnnualizedSlope > 0 &
-                                md$CurrentLTRSI > 0.7
-
-                        InSecondPos = Flip(SecondEntry, md$sell)
-
-                        SecondTrigger = ExRem(InSecondPos, md$sell)
-
+                                Ref(InFirstPos,-1) & md$AnnualizedSlope < kAnnualizedYieldThreshold
+                        
+                        InSecondPos = Flip(SecondEntry, md$cover)
+                        
+                        SecondTrigger = ExRem(InSecondPos, md$cover)
+                        
                         BarsSinceSecondTrigger = BarsSince(SecondTrigger)
-
+                        
                         SecondTriggerPrice = ifelse(
-                                BarsSinceSecondTrigger < BarsSinceSell,
-                                Ref(md$asettle, -BarsSinceSecondTrigger),
+                                BarsSinceSecondTrigger < BarsSinceCover,
+                                Ref(md$asettle,-BarsSinceSecondTrigger),
                                 0
                         )
-
-
-                        ThirdEntry = md$CloseAboveLongTermMA &
-                                md$asettle < SecondTriggerPrice &
+                        
+                        
+                        ThirdEntry = md$CloseBelowLongTermMA &
+                                md$asettle > SecondTriggerPrice &
                                 InSecondPos &
-                                Ref(InSecondPos, -1) & md$AnnualizedSlope > 0 &
-                                md$CurrentLTRSI > 0.7
-
-                        InThirdPos = Flip(ThirdEntry, md$sell)
-
-                        ThirdTrigger = ExRem(InThirdPos, md$sell)
-
+                                Ref(InSecondPos,-1) & md$AnnualizedSlope < kAnnualizedYieldThreshold
+                        
+                        InThirdPos = Flip(ThirdEntry, md$cover)
+                        
+                        ThirdTrigger = ExRem(InThirdPos, md$cover)
+                        
                         BarsSinceThirdTrigger = BarsSince(ThirdTrigger)
-
+                        
                         ThirdTriggerPrice = ifelse(
-                                BarsSinceThirdTrigger < BarsSinceSell,
-                                Ref(md$asettle, -BarsSinceThirdTrigger),
+                                BarsSinceThirdTrigger < BarsSinceCover,
+                                Ref(md$asettle,-BarsSinceThirdTrigger),
                                 0
                         )
-
-
-                        FourthEntry = md$CloseAboveLongTermMA &
-                                md$asettle < ThirdTriggerPrice & InThirdPos &
-                                Ref(InThirdPos, -1) & md$AnnualizedSlope > 0 &
-                                md$CurrentLTRSI > 0.7
-
-                        InFourthPos = Flip(FourthEntry, md$sell)
-
-                        FourthTrigger = ExRem(InFourthPos, md$sell)
-
+                        
+                        
+                        FourthEntry = md$CloseBelowLongTermMA &
+                                md$asettle > ThirdTriggerPrice & InThirdPos &
+                                Ref(InThirdPos,-1) & md$AnnualizedSlope < kAnnualizedYieldThreshold
+                        
+                        InFourthPos = Flip(FourthEntry, md$cover)
+                        
+                        FourthTrigger = ExRem(InFourthPos, md$cover)
+                        
                         BarsSinceFourthTrigger = BarsSince(FourthTrigger)
-
+                        
                         FourthTriggerPrice = ifelse(
-                                BarsSinceFourthTrigger < BarsSinceSell,
-                                Ref(md$asettle, -BarsSinceFourthTrigger),
+                                BarsSinceFourthTrigger < BarsSinceCover,
+                                Ref(md$asettle,-BarsSinceFourthTrigger),
                                 0
                         )
-
-                        md$positionscore = 100 - md$CurrentRSI + (md$asettle - EMA(md$asettle, 20)) *
+                        
+                        md$positionscore = 100 + md$CurrentRSI + (EMA(md$asettle, 20)-md$asettle) *
                                 100 / md$asettle
-
-
+                        
+                        
                         ####### 2. Generate Buy/Sell Arrays ##########
-                        md$buy = ifelse(
-                                FirstTrigger,
-                                1,
-                                ifelse(
-                                        SecondTrigger |
-                                                ThirdTrigger |
-                                                FourthTrigger,
-                                        999,
-                                        0
-                                )
-                        )
-                        md$buy = ifelse(md$eligible == 1, md$buy, 0)
-                        md$sell = ExRem(md$sell, md$buy)
-
-                        md$short = 0
-
-                        md$cover = 0
-
-                        md$buyprice = md$settle
-
-                        md$sellprice = md$settle
-
+                        md$short = ifelse(FirstTrigger,
+                                          1,
+                                          ifelse(SecondTrigger |
+                                                         ThirdTrigger |
+                                                         FourthTrigger, 999, 0))
+                        md$short = ifelse(md$eligible==1,md$short,0)
+                        allsize = folots[folots$symbol == symbol,]
+                        size = sapply(md$date, getcontractsize, allsize)
+                        md$short=ifelse(size>0,md$short,0)
+                        
+                        md$cover = ExRem(md$cover, md$short)
+                        
+                        md$buy = 0
+                        
+                        md$sell = 0
+                        
                         md$shortprice = md$settle
-
+                        
                         md$coverprice = md$settle
-                        md <-
-                                md[md$date >= kBackTestStartDate & md$date <= kBackTestEndDate, ]
-                        allmd[[i]] <- md
+                        
+                        md$buyprice = md$settle
+                        
+                        md$sellprice = md$settle
+                        md <- md[md$date >= kBackTestStartDate & md$date <= kBackTestEndDate,]
+                        allmd[[i]]<-md
                         signals <-
                                 rbind(md[, c(
                                         "date",
@@ -396,17 +411,16 @@ for (i in 1:nrow(niftysymbols)) {
                                         "positionscore",
                                         "symbol"
                                 )], signals)
-                } else{
-                        invalidsymbols <- c(invalidsymbols, i)
+                }else{
+                        invalidsymbols<-c(invalidsymbols,i)
                 }
         }
 }
-#niftysymbols<-niftysymbols[-invalidsymbols,]
 
 signals <- na.omit(signals)
 signals$aclose <- signals$asettle
 dates <- unique(signals[order(signals$date), c("date")])
-a <- ProcessPositionScore(signals, 5, dates)
+a <- ProcessPositionScoreShort(signals, 5, dates)
 # Generate consolidated buy/sell
 processedsignals <- ApplyStop(a, rep(10000000, nrow(a)))
 processedsignals <- processedsignals[order(processedsignals$date), ]
@@ -436,18 +450,6 @@ optionSignals<-optionSignals[with(optionSignals,order(date,symbol,buy,sell)),]
 
 trades <- GenerateTrades(optionSignals)
 trades <- trades[order(trades$entrytime), ]
-
-getcontractsize <- function (x, size) {
-        a <- size[size$startdate <= as.Date(x) & size$enddate >= as.Date(x), ]
-        if (nrow(a) > 0) {
-                a <- head(a, 1)
-        }
-        if (nrow(a) > 0) {
-                return(a$contractsize)
-        } else
-                return(0)
-
-}
 
 trades$size=NULL
 novalue=strptime(NA_character_,"%Y-%m-%d")
