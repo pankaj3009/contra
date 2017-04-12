@@ -312,7 +312,7 @@ for (i in 1:length(tradingsymbols)) {
                         
                         
                         SecondEntry = md$CloseBelowLongTermMA &
-                                md$asettle > FirstTriggerPrice &
+                                md$asettle < FirstTriggerPrice &
                                 InFirstPos &
                                 Ref(InFirstPos,-1) & md$AnnualizedSlope < kAnnualizedYieldThreshold
                         
@@ -330,7 +330,7 @@ for (i in 1:length(tradingsymbols)) {
                         
                         
                         ThirdEntry = md$CloseBelowLongTermMA &
-                                md$asettle > SecondTriggerPrice &
+                                md$asettle < SecondTriggerPrice &
                                 InSecondPos &
                                 Ref(InSecondPos,-1) & md$AnnualizedSlope < kAnnualizedYieldThreshold
                         
@@ -348,7 +348,7 @@ for (i in 1:length(tradingsymbols)) {
                         
                         
                         FourthEntry = md$CloseBelowLongTermMA &
-                                md$asettle > ThirdTriggerPrice & InThirdPos &
+                                md$asettle < ThirdTriggerPrice & InThirdPos &
                                 Ref(InThirdPos,-1) & md$AnnualizedSlope < kAnnualizedYieldThreshold
                         
                         InFourthPos = Flip(FourthEntry, md$cover)
