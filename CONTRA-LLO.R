@@ -462,7 +462,7 @@ for(i in 1:nrow(trades)){
 
 trades$brokerage <- 2*kPerContractBrokerage / (trades$entryprice*trades$size)
 trades$netpercentprofit <- trades$percentprofit - trades$brokerage
-
+trades$absolutepnl<-NA_real_
 if(nrow(trades)>0){
         BizDayBacktestEnd=adjust("India",min(Sys.Date(),
                                              as.Date(kBackTestEndDate, tz = kTimeZone)),bdc=2)
@@ -482,13 +482,13 @@ if(nrow(trades)>0){
                         }else{
                                 trades$exitprice[t] = tail(md$settle,1)
                         }
-                        trades$absolutepnl[t] = (trades$exitprice[t] - trades$entryprice[t] -
-                                                         (2*kPerContractBrokerage / trades$size[t])) * trades$size[t]
-                        
                 }
+                trades$absolutepnl[t] = (trades$exitprice[t] - trades$entryprice[t] -
+                                                 (2*kPerContractBrokerage / trades$size[t])) * trades$size[t]
         }
         
 }
+trades$absolutepnl[which(is.na(trades$absolutepnl))]<-0
 
 #trades$pnl<-(trades$exitprice-trades$entryprice)*trades$size
 
