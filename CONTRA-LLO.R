@@ -42,6 +42,7 @@ kFNODataFolder <- static$FNODataFolder
 kNiftyDataFolder <- static$NiftyDataFolder
 kTimeZone <- static$TimeZone
 kBrokerage<-as.numeric(static$SingleLegBrokerageAsPercentOfValue)/100
+kExchangeMargin<-as.numeric(static$ExchangeMargin)
 kPerContractBrokerage=as.numeric(static$SingleLegBrokerageAsValuePerContract)
 kMaxContracts=as.numeric(static$MaxContracts)
 kHomeDirectory=static$HomeDirectory
@@ -375,8 +376,7 @@ for (i in 1:nrow(niftysymbols)) {
                         md$shortprice = md$settle
 
                         md$coverprice = md$settle
-                        md <-
-                                md[md$date >= kBackTestStartDate & md$date <= kBackTestEndDate, ]
+                        md <-  md[md$date >= kBackTestStartDate & md$date <= kBackTestEndDate, ]
                         allmd[[i]] <- md
                         signals <-
                                 rbind(md[, c(
@@ -449,21 +449,21 @@ getcontractsize <- function (x, size) {
 
 }
 
-trades$size=NULL
-novalue=strptime(NA_character_,"%Y-%m-%d")
-for(i in 1:nrow(trades)){
-        symbolsvector=unlist(strsplit(trades$symbol[i],"_"))
-        allsize = folots[folots$symbol == symbolsvector[1], ]
-        trades$size[i]=getcontractsize(trades$entrytime[i],allsize)
-        if(as.numeric(trades$exittime[i])==0){
-                trades$exittime[i]=novalue
-        }
-}
-
-trades$brokerage <- 2*kPerContractBrokerage / (trades$entryprice*trades$size)
-trades$netpercentprofit <- trades$percentprofit - trades$brokerage
-trades$absolutepnl<-NA_real_
 if(nrow(trades)>0){
+        trades$size=NULL
+        novalue=strptime(NA_character_,"%Y-%m-%d")
+        for(i in 1:nrow(trades)){
+                symbolsvector=unlist(strsplit(trades$symbol[i],"_"))
+                allsize = folots[folots$symbol == symbolsvector[1], ]
+                trades$size[i]=getcontractsize(trades$entrytime[i],allsize)
+                if(as.numeric(trades$exittime[i])==0){
+                        trades$exittime[i]=novalue
+                }
+        }
+        
+        trades$brokerage <- 2*kPerContractBrokerage / (trades$entryprice*trades$size)
+        trades$netpercentprofit <- trades$percentprofit - trades$brokerage
+        trades$absolutepnl<-NA_real_
         BizDayBacktestEnd=adjust("India",min(Sys.Date(),
                                              as.Date(kBackTestEndDate, tz = kTimeZone)),bdc=2)
         for (t in 1:nrow(trades)) {
@@ -487,73 +487,115 @@ if(nrow(trades)>0){
                                                  (2*kPerContractBrokerage / trades$size[t])) * trades$size[t]
         }
         
+        
+        trades$absolutepnl[which(is.na(trades$absolutepnl))]<-0
 }
-trades$absolutepnl[which(is.na(trades$absolutepnl))]<-0
+
 
 #trades$pnl<-(trades$exitprice-trades$entryprice)*trades$size
 
+########### SAVE SIGNALS TO REDIS #################
+
+entrysize <- 0
+exitsize <- 0
+
 if (kUseSystemDate) {
-        today = Sys.Date()
+  today = Sys.Date()
 } else{
-        today = advance("India",dates=Sys.Date(),n=-1,timeUnit = 0,bdc=2)
+  today = advance("India",dates=Sys.Date(),n=-1,timeUnit = 0,bdc=2)
 }
 yesterday=advance("India",dates=today,n=-1,timeUnit = 0,bdc=2)
 
 entrycount = which(as.Date(trades$entrytime,tz=kTimeZone) == today)
 exitcount = which(as.Date(trades$exittime,tz=kTimeZone) == today)
 
-########### SAVE SIGNALS TO REDIS #################
-
-
-if (length(exitcount) > 0 & kWriteToRedis) {
-        redisConnect()
-        redisSelect(args[3])
-        out <- trades[which(as.Date(trades$exittime,tz=kTimeZone) == today),]
-        uniquesymbols=NULL
-        for (o in 1:nrow(out)) {
-                if(length(grep(out[o,"symbol"],uniquesymbols))==0){
-                 uniquesymbols[length(uniquesymbols)+1]<-out[o,"symbol"]
-                 startingposition = abs(GetCurrentPosition(out[o, "symbol"], trades,enddate=yesterday))
-                 redisString = paste(out[o, "symbol"],
-                                     abs(startingposition),
-                                     "SELL",
-                                     0,
-                                     abs(startingposition),
-                                     sep = ":")
-                 redisRPush(paste("trades", args[2], sep = ":"),
-                            charToRaw(redisString))
-                 levellog(logger,
-                          "INFO",
-                          paste(args[2], redisString, sep = ":"))
-                }
-        }
-        redisClose()
+if (length(exitcount) > 0 && kWriteToRedis && args[1]==1) {
+  redisConnect()
+  redisSelect(args[3])
+  out <- trades[which(as.Date(trades$exittime,tz=kTimeZone) == today),]
+  uniquesymbols=NULL
+  for (o in 1:nrow(out)) {
+    if(length(grep(out[o,"symbol"],uniquesymbols))==0){
+      uniquesymbols[length(uniquesymbols)+1]<-out[o,"symbol"]
+      startingposition = GetCurrentPosition(out[o, "symbol"], trades,position.on=yesterday,trades.till=yesterday)
+      redisString = paste(out[o, "symbol"],
+                          abs(startingposition),
+                          ifelse(startingposition>0,"SELL","COVER"),
+                          0,
+                          abs(startingposition),
+                          sep = ":")
+      redisRPush(paste("trades", args[2], sep = ":"),
+                 charToRaw(redisString))
+      levellog(logger,
+               "INFO",
+               paste(args[2], redisString, sep = ":"))
+    }
+  }
+  redisClose()
 }
 
-if (length(entrycount) > 0 & kWriteToRedis) {
-        redisConnect()
-        redisSelect(args[3])
-        out <- trades[which(as.Date(trades$entrytime,tz=kTimeZone) == today),]
-        uniquesymbols=NULL
-        for (o in 1:nrow(out)) {
-          if(length(grep(out[o,"symbol"],uniquesymbols))==0){
-            uniquesymbols[length(uniquesymbols)+1]<-out[o,"symbol"]
-            startingposition = abs(GetCurrentPosition(out[o, "symbol"], trades,startdate=yesterday))
-            todaytradesize=abs(GetCurrentPosition(out[o, "symbol"], trades))-startingposition
-            redisString = paste(out[o, "symbol"],
-                                todaytradesize,
-                                "BUY",
-                                0,
-                                abs(startingposition),
-                                sep = ":")
-            redisRPush(paste("trades", args[2], sep = ":"),
-                       charToRaw(redisString))
-            levellog(logger,
-                     "INFO",
-                     paste(args[2], redisString, sep = ":"))
 
-            }
+if (length(entrycount) > 0 && kWriteToRedis && args[1]==1) {
+  redisConnect()
+  redisSelect(args[3])
+  out <- trades[which(as.Date(trades$entrytime,tz=kTimeZone) == today),]
+  uniquesymbols=NULL
+  for (o in 1:nrow(out)) {
+    if(length(grep(out[o,"symbol"],uniquesymbols))==0){
+      uniquesymbols[length(uniquesymbols)+1]<-out[o,"symbol"]
+      startingposition = GetCurrentPosition(out[o, "symbol"], trades,trades.till=yesterday,position.on = today)
+      todaytradesize=GetCurrentPosition(out[o, "symbol"], trades)-startingposition
+      redisString = paste(out[o, "symbol"],
+                          abs(todaytradesize),
+                          ifelse(todaytradesize>0,"BUY","SHORT"),
+                          0,
+                          abs(startingposition),
+                          sep = ":")
+      redisRPush(paste("trades", args[2], sep = ":"),
+                 charToRaw(redisString))
+      levellog(logger,
+               "INFO",
+               paste(args[2], redisString, sep = ":"))
+      
+    }
+    
+  }
+  redisClose()
+}
 
+
+############ METRICS ##################
+if(nrow(trades)>0){
+        symbol=niftysymbols$symbol[1]
+        datesinscope=numeric()
+        if (file.exists(paste(kNiftyDataFolder, symbol, ".Rdata", sep = ""))) {
+                load(paste(kNiftyDataFolder, symbol, ".Rdata", sep = ""))
+                datesinscope=md[md$date>kBackTestStartDate & md$date<=kBackTestEndDate,c("date")]
+                pnl<-data.frame(bizdays=as.Date(datesinscope,tz=kTimeZone),realized=0,unrealized=0,brokerage=0)
+                cleansedTrades<-trades[!is.na(trades$entryprice),]
+                cumpnl<-CalculateDailyPNL(cleansedTrades,pnl,kFNODataFolder,kPerContractBrokerage/cleansedTrades$size,deriv=TRUE)
         }
-        redisClose()
+        
+        DailyPNL <-  (cumpnl$realized + cumpnl$unrealized-cumpnl$brokerage) - Ref(cumpnl$realized + cumpnl$unrealized-cumpnl$brokerage, -1)
+        DailyPNL <- ifelse(is.na(DailyPNL), 0, DailyPNL)
+        Capital<-20*500000*kExchangeMargin
+        DailyReturn<-DailyPNL/Capital
+        df <- data.frame(time = as.Date(datesinscope,tz=kTimeZone), return = DailyReturn)
+        df <- read.zoo(df)
+        sharpeRatio <-  sharpe(DailyReturn)
+        print(paste("sharpe:", sharpeRatio, sep = ""))
+        
+        
+        return<-sum(trades$absolutepnl) * 100 / Capital
+        print(paste("Annual Return:",return))
+        print(paste("winratio:", sum(trades$absolutepnl > 0) / nrow(trades), sep =""))
+        
+        if(nrow(cumpnl)>1){
+                cumpnl$group <- strftime(cumpnl$bizdays, "%Y%m")
+                cumpnl$dailypnl<-DailyPNL
+                dd.agg <- aggregate(dailypnl ~ group, cumpnl, FUN = sum)
+                print(paste("Average Loss in Losing Month:",mean(dd.agg[which(dd.agg$dailypnl<0),'dailypnl']),sep=""))
+                print(paste("Percentage Losing Months:",sum(dd.agg$dailypnl<0)/nrow(dd.agg)))
+        }
+        
 }
