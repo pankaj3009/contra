@@ -47,6 +47,7 @@ kPerContractBrokerage=as.numeric(static$SingleLegBrokerageAsValuePerContract)
 kMaxContracts=as.numeric(static$MaxContracts)
 kHomeDirectory=static$HomeDirectory
 kLogFile=static$LogFile
+kExclusionsFile=static$ExclusionsFile
 setwd(kHomeDirectory)
 strategyname = args[2]
 redisDB = args[3]
@@ -70,6 +71,7 @@ splits <-
                 header = TRUE,
                 stringsAsFactors = FALSE
         )
+
 symbolchange <-
         read.csv(
                 paste(kNiftyDataFolder, "/", "symbolchange.csv", sep = ""),
@@ -97,8 +99,12 @@ folots <- createFNOSize(2, "contractsize", threshold = "2015-01-01")
 
 invalidsymbols = numeric()
 endtime = format(Sys.time(), format = "%Y-%m-%d %H:%M:%S")
-#cl <- makeCluster(detectCores())
-#registerDoParallel(cl)
+if(!is.null(kExclusionsFile)){
+        exclusions<-unlist(read.csv(kExclusionsFile,header=FALSE,stringsAsFactors = FALSE))    
+        indicestoremove=match(exclusions,niftysymbols$symbol)
+        niftysymbols<-niftysymbols[-indicestoremove,]
+}
+
 if (kGetMarketData) {
         for (i in 1:nrow(niftysymbols)) {
                 # foreach (i =1:nrow(niftysymbols),.packages="RTrade") %dopar% {

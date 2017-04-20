@@ -47,6 +47,7 @@ kMaxContracts=as.numeric(static$MaxContracts)
 kHomeDirectory=static$HomeDirectory
 kAnnualizedYieldThreshold=as.numeric(static$AnnualizedYieldThreshold)
 kLogFile=static$LogFile
+kExclusionsFile=static$ExclusionsFile
 setwd(kHomeDirectory)
 strategyname = args[2]
 redisDB = args[3]
@@ -122,6 +123,11 @@ tradingsymbols=unique(tradingsymbols)
 invalidsymbols=numeric()
 endtime = format(Sys.time(), format = "%Y-%m-%d %H:%M:%S")
 
+if(!is.null(kExclusionsFile)){
+        exclusions<-unlist(read.csv(kExclusionsFile,header=FALSE,stringsAsFactors = FALSE))    
+        indicestoremove=match(exclusions,tradingsymbols$symbol)
+        tradingsymbols<-tradingsymbols[-indicestoremove,]
+}
 if (kGetMarketData) {
         for (i in 1:length(tradingsymbols)) {
                 md = data.frame() # create placeholder for market data
